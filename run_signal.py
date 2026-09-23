@@ -172,7 +172,7 @@ if __name__ == "__main__":
     changed, subject, text = build_message(rows, note)
     print(text)
 
-   weekly = datetime.now(KST).weekday() == 1   # 화요일(KST) = 미국 월요일 마감 후
+    weekly = datetime.now(KST).weekday() == 1
     if changed or weekly or os.getenv("FORCE_NOTIFY") == "1":
         sent, failed = [], []
         for name, fn in [("텔레그램", lambda: send_telegram(text)),
