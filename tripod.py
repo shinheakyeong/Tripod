@@ -112,6 +112,22 @@ def fred_ndx():
     for r in csv.reader(io.StringIO(txt)):
         if len(r) == 2 and r[1] not in ("", ".") and r[0][:1].isdigit():
             out[r[0].replace("-", "")] = float(r[1])
+    if len(out) < 100:
+        raise RuntimeError("FRED 응답이 비어 있음")
+    return out
+
+
+def stooq_ndx():
+    """Stooq 나스닥100 (교차검증 예비용) → {YYYYMMDD: close}"""
+    txt = _get("https://stooq.com/q/d/l/?s=%5Endq&i=d")
+    out = {}
+    for r in csv.DictReader(io.StringIO(txt)):
+        try:
+            out[r["Date"].replace("-", "")] = float(r["Close"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    if len(out) < 100:
+        raise RuntimeError("Stooq 응답이 비어 있음")
     return out
 
 
