@@ -6,14 +6,44 @@
   환경변수: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, GMAIL_USER, GMAIL_APP_PASSWORD, MAIL_TO
   FORCE_NOTIFY=1 이면 변경 여부와 관계없이 발송 (첫 설치 테스트용)
 """
-import json, os, smtplib, sys, urllib.parse, urllib.request
+import csv, io, json, os, smtplib, sys, urllib.parse, urllib.request
 from datetime import datetime
 from email.mime.text import MIMEText
 from zoneinfo import ZoneInfo
 from tripod import (P, LABEL, alloc_text, gear, evaluate, load_live, load_csv,
-                    fred_ndx, stooq_ndx)
+                    yahoo, _get)
 
 KST = ZoneInfo("Asia/Seoul")
+
+
+def _fred(url):
+    out = {}
+    for r in csv.reader(io.StringIO(_get(url))):
+        if len(r) == 2 and r[1] not in ("", ".") and r[0][:1].isdigit():
+            out[r[0].replace("-", "")] = float(r[1])
+    if len(out) < 100:
+        raise RuntimeError("응답이 비어 있음")
+    return out
+
+
+def _stooq(url):
+    out = {}
+    for r in csv.DictReader(io.StringIO(_get(url))):
+        try:
+            out[r["Date"].replace("-", "")] = float(r["Close"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    if len(out) < 100:
+        raise RuntimeError("응답이 비어 있음")
+    return out
+
+
+SOURCES = [
+    ("FRED", lambda: _fred("https://fred.stlouisfed.org/graph/fredgraph.csv?id=NASDAQ100")),
+    ("FRED2", lambda: _fred("https://fred.stlouisfed.org/graph/fredgraph.csv?bgcolor=%23e1e9f0&id=NASDAQ100")),
+    ("Stooq", lambda: _stooq("https://stooq.com/q/d/l/?s=%5Endq&i=d")),
+    ("Stooq2", lambda: _stooq("https://stooq.pl/q/d/l/?s=%5Endq&i=d")),
+]
 
 
 def self_check(rows):
@@ -33,15 +63,31 @@ def self_check(rows):
     return f"자체 점검 통과(최신 {rows[-1]['date']})"
 
 
+def qqq_check(rows):
+    """외부 출처가 모두 막혔을 때: 같은 기간 QQQ 등락률과 비교(다른 종목 대조)."""
+    q = yahoo("QQQ")
+    checked = 0
+    for a, b in zip(rows[-6:-1], rows[-5:]):
+        if a["date"] in q and b["date"] in q:
+            d = (b["ndx"]/a["ndx"]) - (q[b["date"]]/q[a["date"]])
+            if abs(d) > 0.005:
+                raise SystemExit(f"[중단] {b['date']} 나스닥100과 QQQ 등락률이 "
+                                 f"{d*100:.2f}%p 차이 — 데이터 이상, 판정하지 않음")
+            checked += 1
+    if not checked:
+        raise RuntimeError("QQQ와 겹치는 날 없음")
+    return f"QQQ 대조 {checked}일 일치"
+
+
 def cross_check(rows):
-    """Yahoo 나스닥100을 FRED→Stooq 순으로 대조. 0.5% 넘게 다르면 중단."""
+    """FRED→Stooq→QQQ 순으로 대조. 값이 어긋나면 판정 중단."""
     note = self_check(rows)
     errors = []
-    for name, fetch in (("FRED", fred_ndx), ("Stooq", stooq_ndx)):
+    for name, fetch in SOURCES:
         try:
             ref = fetch()
         except Exception as e:
-            errors.append(f"{name} 실패")
+            errors.append(name)
             print(f"[경고] {name} 대조 불가: {e}")
             continue
         checked = 0
@@ -55,15 +101,20 @@ def cross_check(rows):
                 checked += 1
         if checked:
             return f"{name} 대조 {checked}일 일치"
-        errors.append(f"{name} 날짜 불일치")
-    return f"교차검증 불가({', '.join(errors)}) — {note}"
+        errors.append(f"{name}(날짜 불일치)")
+    try:
+        return f"{qqq_check(rows)} · 외부출처 차단({', '.join(errors)})"
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"[경고] QQQ 대조 불가: {e}")
+    return f"교차검증 불가({', '.join(errors)}, QQQ) — {note}"
 
 
 def build_message(rows, check_note):
     valid = [r for r in rows if r["state"]]
     last, prev = valid[-1], valid[-2]
     changed = last["state"] != prev["state"]
-    # 현재 상태가 시작된 날
     since = last["date"]
     for r in reversed(valid):
         if r["state"] != last["state"]:
@@ -112,7 +163,7 @@ def send_mail(subject, text):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:                       # 오프라인 테스트: python3 run_signal.py data/market.csv
+    if len(sys.argv) > 1:                       # 오프라인 테스트
         rows, note = load_csv(sys.argv[1]), "오프라인 CSV"
     else:
         rows = load_live()
