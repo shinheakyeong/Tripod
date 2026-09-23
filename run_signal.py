@@ -11,30 +11,52 @@ from datetime import datetime
 from email.mime.text import MIMEText
 from zoneinfo import ZoneInfo
 from tripod import (P, LABEL, alloc_text, gear, evaluate, load_live, load_csv,
-                    fred_ndx)
+                    fred_ndx, stooq_ndx)
 
 KST = ZoneInfo("Asia/Seoul")
 
 
+def self_check(rows):
+    """외부 출처와 무관한 기본 점검. 하나라도 걸리면 판정 중단."""
+    if len(rows) < P["sma_window"] + 10:
+        raise SystemExit(f"[중단] 데이터가 {len(rows)}일뿐 — 250일선 계산 불가")
+    last = datetime.strptime(rows[-1]["date"], "%Y%m%d").date()
+    gap = (datetime.now(ZoneInfo("America/New_York")).date() - last).days
+    if gap > 5:
+        raise SystemExit(f"[중단] 최신 데이터가 {rows[-1]['date']} ({gap}일 전) — 시세가 멈춰 있음")
+    for a, b in zip(rows[-6:-1], rows[-5:]):
+        move = abs(b["ndx"] / a["ndx"] - 1)
+        if move > 0.15:
+            raise SystemExit(f"[중단] {b['date']} 하루 변동 {move*100:.1f}% — 데이터 오류 의심")
+    if rows[-1]["vix"] is None or not (5 < rows[-1]["vix"] < 100):
+        raise SystemExit(f"[중단] VIX 값 이상: {rows[-1]['vix']}")
+    return f"자체 점검 통과(최신 {rows[-1]['date']})"
+
+
 def cross_check(rows):
-    """Yahoo 나스닥100 최근 값을 FRED와 대조. 0.5% 넘게 다르면 중단."""
-    try:
-        fred = fred_ndx()
-    except Exception as e:
-        print(f"[경고] FRED 대조 생략: {e}")
-        return "FRED 접속 실패(대조 생략)"
-    checked = 0
-    for r in rows[-8:]:
-        f = fred.get(r["date"])
-        if f:
-            diff = abs(r["ndx"] / f - 1)
-            if diff > 0.005:
-                raise SystemExit(f"[중단] {r['date']} Yahoo {r['ndx']:.2f} vs FRED {f:.2f} "
-                                 f"({diff*100:.2f}% 차이) — 데이터 이상, 판정하지 않음")
-            checked += 1
-    if checked == 0:
-        raise SystemExit("[중단] 최근 8거래일 중 FRED와 겹치는 날이 없음")
-    return f"FRED 대조 {checked}일 일치"
+    """Yahoo 나스닥100을 FRED→Stooq 순으로 대조. 0.5% 넘게 다르면 중단."""
+    note = self_check(rows)
+    errors = []
+    for name, fetch in (("FRED", fred_ndx), ("Stooq", stooq_ndx)):
+        try:
+            ref = fetch()
+        except Exception as e:
+            errors.append(f"{name} 실패")
+            print(f"[경고] {name} 대조 불가: {e}")
+            continue
+        checked = 0
+        for r in rows[-8:]:
+            v = ref.get(r["date"])
+            if v:
+                diff = abs(r["ndx"] / v - 1)
+                if diff > 0.005:
+                    raise SystemExit(f"[중단] {r['date']} Yahoo {r['ndx']:.2f} vs {name} {v:.2f} "
+                                     f"({diff*100:.2f}% 차이) — 데이터 이상, 판정하지 않음")
+                checked += 1
+        if checked:
+            return f"{name} 대조 {checked}일 일치"
+        errors.append(f"{name} 날짜 불일치")
+    return f"교차검증 불가({', '.join(errors)}) — {note}"
 
 
 def build_message(rows, check_note):
