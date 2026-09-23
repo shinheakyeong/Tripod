@@ -172,10 +172,20 @@ if __name__ == "__main__":
     changed, subject, text = build_message(rows, note)
     print(text)
 
-    weekly = datetime.now(KST).weekday() == 1   # 화요일(KST) = 미국 월요일 마감 후
+   weekly = datetime.now(KST).weekday() == 1   # 화요일(KST) = 미국 월요일 마감 후
     if changed or weekly or os.getenv("FORCE_NOTIFY") == "1":
-        sent = [n for n, f in [("텔레그램", lambda: send_telegram(text)),
-                               ("이메일", lambda: send_mail(subject, text))] if f()]
-        print(f"\n발송: {', '.join(sent) if sent else '알림 채널 미설정'}")
+        sent, failed = [], []
+        for name, fn in [("텔레그램", lambda: send_telegram(text)),
+                         ("이메일", lambda: send_mail(subject, text))]:
+            try:
+                if fn():
+                    sent.append(name)
+            except Exception as e:
+                failed.append(f"{name}({e})")
+        print(f"\n발송: {', '.join(sent) if sent else '없음'}")
+        if failed:
+            print(f"발송 실패: {', '.join(failed)}")
+        if not sent:
+            raise SystemExit("[중단] 모든 알림 채널 발송 실패")
     json.dump({"asof": rows[-1]["date"], "state": [r for r in rows if r["state"]][-1]["state"],
                "changed": changed}, open("last_signal.json", "w"), ensure_ascii=False)
